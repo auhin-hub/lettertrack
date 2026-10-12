@@ -138,6 +138,7 @@
     <span class="who" id="keeper"></span>
     <span class="sp"></span>
     <span class="who" id="userEmail"></span>
+    <button id="downloadBtn" title="Download all registers for the selected year as one Excel file">⬇ Download Excel</button>
     <button id="logout">Log out</button>
   </header>
 
@@ -168,6 +169,7 @@
 <div id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 /* ============================ SETUP CHECK ============================ */
 if (SUPABASE_URL.startsWith("PASTE") || SUPABASE_ANON_KEY.startsWith("PASTE")) {
@@ -288,6 +290,31 @@ $("#loginForm").addEventListener("submit", async e => {
   if (error) $("#loginErr").textContent = error.message;
 });
 $("#logout").addEventListener("click", async () => { await sb.auth.signOut(); });
+
+/* ---- Download the whole register (this fiscal year) as one Excel file ---- */
+$("#downloadBtn").addEventListener("click", async () => {
+  const btn = $("#downloadBtn"); btn.disabled = true; toast("Preparing Excel…");
+  try {
+    const wb = XLSX.utils.book_new();
+    const sheets = [["outgoing","Outgoing"],["incoming","Incoming"],["challan","Challan"],["work_orders","Work Orders"]];
+    for (const [reg, label] of sheets){
+      const { data, error } = await sb.from(reg).select("*").eq("fy", FY).order("seq");
+      if (error){ toast(error.message, true); btn.disabled=false; return; }
+      const cols = REG[reg].cols;
+      const aoa = [ cols.map(c => c.t) ];
+      (data||[]).forEach(r => aoa.push(cols.map(c => c.ro ? c.ro(r) : (r[c.k] ?? ""))));
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws["!cols"] = cols.map(c => ({ wch: Math.min(40, Math.max(12, c.t.length + 2)) }));
+      ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+      XLSX.utils.book_append_sheet(wb, ws, label);
+    }
+    const stamp = new Date().toISOString().slice(0,10);
+    const safeFy = FY.replace(/[^\w-]+/g, "_");
+    XLSX.writeFile(wb, `TBL_Letter_Register_${safeFy}_${stamp}.xlsx`);
+    toast("Downloaded");
+  } catch (e){ toast("Could not build the file: " + e.message, true); }
+  btn.disabled = false;
+});
 
 sb.auth.onAuthStateChange((_e, session) => {
   if (session) start(session); else showLogin();
