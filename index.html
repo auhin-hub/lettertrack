@@ -210,7 +210,7 @@ const REG = {
       {k:"to_addressee",t:"To", type:"list", list:"addressee", flag:true},
       {k:"subject",t:"Subject", type:"textarea"},
       {k:"prepared_by",t:"Prepared by", type:"list", list:"team"},
-      {k:"in_reply_to",t:"In reply to (their letter no.)", type:"text"},
+      {k:"in_reply_to",t:"In reply to (their letter no.)", type:"incomingno"},
       {k:"_file", t:"File name (copy for the PDF)", ro:r=>fileName("TBL-D", r)},
       {k:"remarks",t:"Remarks", type:"textarea"},
     ],
@@ -272,6 +272,7 @@ const REG = {
 /* ============================ STATE ================================ */
 let LISTS = {team:[], addressee:[], contract:[], vendor:[]};
 let OUTGOING_NOS = [];     // registered outgoing letter numbers (for Incoming reply dropdown)
+let INCOMING_NOS = [];     // sender letter numbers from Incoming (for Outgoing "in reply to" dropdown)
 let SETTINGS = {};
 let CUR = "outgoing";      // active register
 let FY = "FY 2026-27";     // active fiscal year
@@ -395,6 +396,7 @@ $("#search").addEventListener("input", e => { SEARCH = e.target.value.toLowerCas
 
 async function loadReg(){
   if (CUR==="incoming") await loadOutgoingNos();
+  if (CUR==="outgoing") await loadIncomingNos();
   const { data, error } = await sb.from(CUR).select("*").eq("fy", FY).order("seq");
   if (error) return toast(error.message, true);
   ROWS = data; renderGrid(); updateUsage();
@@ -402,6 +404,12 @@ async function loadReg(){
 async function loadOutgoingNos(){
   const { data } = await sb.from("outgoing").select("seq,status").eq("fy", FY).order("seq");
   OUTGOING_NOS = (data||[]).filter(r=>r.status!=="Cancelled").map(r=>"TBL/D/"+pad(r.seq));
+}
+async function loadIncomingNos(){
+  const { data } = await sb.from("incoming").select("senders_letter_no").eq("fy", FY).order("seq");
+  const seen = new Set(); INCOMING_NOS = [];
+  (data||[]).forEach(r => { const v=(r.senders_letter_no||"").trim();
+    if (v && !seen.has(v)) { seen.add(v); INCOMING_NOS.push(v); } });
 }
 
 function updateUsage(){
@@ -457,8 +465,11 @@ function fieldHtml(c, r){
     const opts = c.opts.map(o=>`<option ${o===v?"selected":""}>${esc(o)}</option>`).join("");
     return `<select class="cell" data-k="${c.k}">${opts}</select>`;
   }
-  if (c.type==="list" || c.type==="replyno"){
-    const items = c.type==="replyno" ? OUTGOING_NOS.slice() : (LISTS[c.list]||[]).map(x=>x.value);
+  if (c.type==="list" || c.type==="replyno" || c.type==="incomingno"){
+    let items;
+    if (c.type==="replyno")        items = OUTGOING_NOS.slice();
+    else if (c.type==="incomingno") items = INCOMING_NOS.slice();
+    else                            items = (LISTS[c.list]||[]).map(x=>x.value);
     if (v && !items.includes(v)) items.unshift(v);     // keep unknown existing value
     const opts = `<option value=""></option>` + items.map(o=>`<option ${o===v?"selected":""}>${esc(o)}</option>`).join("");
     return `<select class="cell" data-k="${c.k}">${opts}</select>`;
@@ -631,11 +642,18 @@ function subscribeRealtime(){
     .on("postgres_changes", {event:"*", schema:"public"}, payload => {
       const tbl = payload.table;
       if (tbl==="lists" || tbl==="settings"){ loadLists().then(()=>{ if(CUR==="lists") renderLists(); }); return; }
-      // Incoming reply dropdown depends on outgoing numbers
+      // Cross-register dropdowns: Incoming's reply list depends on Outgoing,
+      // and Outgoing's "in reply to" list depends on Incoming.
       if (tbl==="outgoing" && CUR==="incoming"){
         const editing = $("#view").contains(document.activeElement) &&
           ["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
         if (!editing) loadOutgoingNos().then(renderGrid); else showStale();
+        return;
+      }
+      if (tbl==="incoming" && CUR==="outgoing"){
+        const editing = $("#view").contains(document.activeElement) &&
+          ["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
+        if (!editing) loadIncomingNos().then(renderGrid); else showStale();
         return;
       }
       if (tbl===CUR){
