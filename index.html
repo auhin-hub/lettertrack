@@ -53,9 +53,12 @@
 
   /* ---------- Grid ---------- */
   .wrap{padding:0 14px 40px;overflow:auto}
-  table{border-collapse:collapse;background:#fff;width:100%;min-width:720px}
-  th,td{border:1px solid var(--line);padding:0;vertical-align:middle}
+  table{border-collapse:collapse;background:#fff;table-layout:fixed}
+  th,td{border:1px solid var(--line);padding:0;vertical-align:middle;overflow:hidden}
   thead th{position:sticky;top:0;background:var(--head2);color:#fff;font-weight:600;padding:8px 8px;text-align:left;font-size:12.5px;z-index:2}
+  th .thlabel{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px}
+  th .rz{position:absolute;top:0;right:-3px;width:9px;height:100%;cursor:col-resize;z-index:3}
+  th .rz:hover{background:#ffffff66}
   td .cell{width:100%;border:0;background:transparent;padding:7px 8px;font-size:13px;font-family:inherit;color:inherit}
   td input.cell:focus,td select.cell:focus,td textarea.cell:focus{outline:2px solid var(--head);background:#fff;position:relative;z-index:1}
   td.ro{background:#f0f1f3;color:#3a4250;font-weight:600;padding:7px 8px;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -495,7 +498,13 @@ function renderGrid(){
     ROWS.forEach(r=>{const v=(r.senders_letter_no||"").trim().toLowerCase(); if(v&&counts[v]>1) dupSet.add(r.id);});
   }
 
-  const head = "<tr>" + def.cols.map(c=>`<th>${esc(c.t)}</th>`).join("") + `<th class="delh"></th></tr>`;
+  const widths = getWidths(CUR);
+  const colEls = def.cols.map(c=>`<col data-key="${esc(c.k)}" style="width:${widths[c.k]||defaultWidth(c)}px">`).join("")
+               + `<col data-key="_del" style="width:46px">`;
+  const totalW = def.cols.reduce((s,c)=>s+(widths[c.k]||defaultWidth(c)),0) + 46;
+  const head = "<tr>" + def.cols.map(c=>
+      `<th><span class="thlabel" title="${esc(c.t)}">${esc(c.t)}</span><span class="rz" data-key="${esc(c.k)}"></span></th>`
+    ).join("") + `<th class="delh"></th></tr>`;
   let body;
   if (!rows.length){
     body = `<tr><td class="empty" colspan="${def.cols.length+1}">${ROWS.length? "No match." : "No rows yet. Click “Reserve next number” to start."}</td></tr>`;
@@ -514,8 +523,54 @@ function renderGrid(){
       return `<tr data-id="${r.id}" class="${cls}">${tds}${delCell}</tr>`;
     }).join("");
   }
-  $("#view").innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  $("#view").innerHTML = `<table style="width:${totalW}px"><colgroup>${colEls}</colgroup><thead>${head}</thead><tbody>${body}</tbody></table>`;
   bindCells();
+  bindResizers();
+}
+
+/* ---- column width persistence + drag-to-resize ---- */
+function defaultWidth(c){
+  if (c.k==="_no") return 130;
+  if (c.type==="status"||c.type==="fixed") return 120;
+  if (c.type==="date") return 125;
+  if (c.type==="number") return 70;
+  if (c.type==="textarea") return 240;
+  if (c.ro) return 160;
+  if (c.type==="list"||c.type==="replyno"||c.type==="incomingno") return 150;
+  return 150;
+}
+function getWidths(reg){ try { return JSON.parse(localStorage.getItem("tbl_w_"+reg)) || {}; } catch(e){ return {}; } }
+function saveWidth(reg, key, w){
+  try { const o = getWidths(reg); o[key] = w; localStorage.setItem("tbl_w_"+reg, JSON.stringify(o)); } catch(e){}
+}
+function clearWidth(reg, key){
+  try { const o = getWidths(reg); delete o[key]; localStorage.setItem("tbl_w_"+reg, JSON.stringify(o)); } catch(e){}
+}
+function recalcTableWidth(table){
+  let t = 0; table.querySelectorAll("col").forEach(c => t += (parseInt(c.style.width)||0));
+  table.style.width = t + "px";
+}
+function bindResizers(){
+  $("#view").querySelectorAll(".rz").forEach(h => {
+    const key = h.dataset.key;
+    const table = $("#view").querySelector("table");
+    const col = table.querySelector(`col[data-key="${CSS.escape(key)}"]`);
+    h.addEventListener("mousedown", e => {
+      e.preventDefault(); e.stopPropagation();
+      const startX = e.clientX, startW = parseInt(col.style.width) || 120;
+      document.body.style.cursor = "col-resize";
+      const mm = ev => { col.style.width = Math.max(60, startW + (ev.clientX - startX)) + "px"; recalcTableWidth(table); };
+      const mu = () => {
+        document.removeEventListener("mousemove", mm);
+        document.removeEventListener("mouseup", mu);
+        document.body.style.cursor = "";
+        saveWidth(CUR, key, parseInt(col.style.width));
+      };
+      document.addEventListener("mousemove", mm);
+      document.addEventListener("mouseup", mu);
+    });
+    h.addEventListener("dblclick", e => { e.preventDefault(); clearWidth(CUR, key); renderGrid(); });
+  });
 }
 
 function fieldHtml(c, r){
