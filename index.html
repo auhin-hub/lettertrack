@@ -60,12 +60,12 @@
   td input.cell:focus,td select.cell:focus,td textarea.cell:focus{outline:2px solid var(--head);background:#fff;position:relative;z-index:1}
   td.ro{background:#f0f1f3;color:#3a4250;font-weight:600;padding:7px 8px;white-space:nowrap;font-variant-numeric:tabular-nums}
   td textarea.cell{resize:vertical;min-height:30px;line-height:1.3}
-  tr.st-Reserved td.status-cell{background:var(--orange)}
-  tr.st-Issued   td.status-cell,tr.st-Replied td.status-cell{background:var(--green)}
-  tr.st-Completed td.status-cell{background:var(--blue)}
+  tr.st-Reserved td.status-cell,tr.st-Low td.status-cell{background:var(--orange)}
+  tr.st-Issued td.status-cell,tr.st-Replied td.status-cell,tr.st-Floated td.status-cell,tr.st-Available td.status-cell{background:var(--green)}
+  tr.st-Completed td.status-cell,tr.st-Awarded td.status-cell{background:var(--blue)}
   tr.st-Cancelled,tr.st-Closed{color:#8a8f98}
   tr.st-Cancelled td.ro,tr.st-Closed td.ro{text-decoration:line-through}
-  tr.st-Cancelled td.status-cell,tr.st-Closed td.status-cell{background:var(--grey)}
+  tr.st-Cancelled td.status-cell,tr.st-Closed td.status-cell,tr.st-Out td.status-cell{background:var(--grey)}
   tr.missing td.flag{background:var(--red)}
   td.dup{background:var(--orange);box-shadow:inset 0 0 0 2px #e08a00}
   td.del{background:#f0f1f3;text-align:center}
@@ -147,6 +147,8 @@
     <button data-reg="incoming">Incoming</button>
     <button data-reg="challan">Challan</button>
     <button data-reg="work_orders">Work Orders</button>
+    <button data-reg="tenders">Tenders</button>
+    <button data-reg="inventory">Inventory</button>
     <button data-reg="summary">Summary</button>
     <button data-reg="lists">Lists</button>
   </nav>
@@ -267,7 +269,39 @@ const REG = {
     missing:r=> (r.status==="Issued"||r.status==="Completed") && !r.date
              || r.status==="Completed" && !r.completed_on,
   },
+  tenders: {
+    label:"Tenders", cap:"cap_tenders",
+    cols:[
+      {k:"_no",   t:"Tender No.", ro:r=>"TBL/D/Tender/"+pad(r.seq)},
+      {k:"status",t:"Status", type:"status", opts:["Reserved","Floated","Awarded","Cancelled"], statusCell:true},
+      {k:"date",  t:"Floated Date", type:"date", flag:true},
+      {k:"contract_no",t:"Contract No.", type:"list", list:"contract"},
+      {k:"subject",t:"Tender Subject", type:"textarea"},
+      {k:"closing_date",t:"Closing Date", type:"date"},
+      {k:"awarded_to",t:"Awarded To", type:"list", list:"vendor"},
+      {k:"prepared_by",t:"Prepared by", type:"list", list:"team"},
+      {k:"remarks",t:"Remarks", type:"textarea"},
+    ],
+    missing:r=> (r.status==="Floated" && !r.date) || (r.status==="Awarded" && !r.awarded_to),
+  },
+  inventory: {
+    label:"Inventory", global:true, addLabel:"Add item", noSpecific:true,
+    cols:[
+      {k:"_no",   t:"Item Code", ro:r=>"INV/"+pad(r.seq)},
+      {k:"status",t:"Status", type:"status", opts:["Available","Low","Out"], statusCell:true},
+      {k:"item_type",t:"Item Type", type:"list", list:"item_type"},
+      {k:"item_description",t:"Item / Description", type:"textarea"},
+      {k:"vehicle",t:"Vehicle", type:"text"},
+      {k:"part_number",t:"Part Number", type:"text"},
+      {k:"qty",   t:"Qty", type:"number"},
+      {k:"location",t:"Location", type:"text"},
+      {k:"prepared_by",t:"Added by", type:"list", list:"team"},
+      {k:"remarks",t:"Remarks", type:"textarea"},
+    ],
+  },
 };
+// inventory is one running list, not split by fiscal year
+function regFy(reg){ return (REG[reg] && REG[reg].global) ? "ALL" : FY; }
 
 /* ============================ STATE ================================ */
 let LISTS = {team:[], addressee:[], contract:[], vendor:[]};
@@ -297,9 +331,9 @@ $("#downloadBtn").addEventListener("click", async () => {
   const btn = $("#downloadBtn"); btn.disabled = true; toast("Preparing Excel…");
   try {
     const wb = XLSX.utils.book_new();
-    const sheets = [["outgoing","Outgoing"],["incoming","Incoming"],["challan","Challan"],["work_orders","Work Orders"]];
+    const sheets = [["outgoing","Outgoing"],["incoming","Incoming"],["challan","Challan"],["work_orders","Work Orders"],["tenders","Tenders"],["inventory","Inventory"]];
     for (const [reg, label] of sheets){
-      const { data, error } = await sb.from(reg).select("*").eq("fy", FY).order("seq");
+      const { data, error } = await sb.from(reg).select("*").eq("fy", regFy(reg)).order("seq");
       if (error){ toast(error.message, true); btn.disabled=false; return; }
       const cols = REG[reg].cols;
       const aoa = [ cols.map(c => c.t) ];
@@ -360,10 +394,11 @@ function buildNameSel(){
 async function buildFySel(){
   // distinct fy values across all registers + current
   const found = new Set([FY]);
-  for (const t of ["outgoing","incoming","challan","work_orders"]){
+  for (const t of ["outgoing","incoming","challan","work_orders","tenders"]){
     const { data } = await sb.from(t).select("fy");
     (data||[]).forEach(r => found.add(r.fy));
   }
+  found.delete("ALL");
   const sel = $("#fySel");
   sel.innerHTML = [...found].sort().reverse()
     .map(v => `<option ${v===FY?"selected":""}>${esc(v)}</option>`).join("");
@@ -380,7 +415,8 @@ function selectReg(reg){
   [...$("#tabs").children].forEach(b => b.classList.toggle("on", b.dataset.reg===reg));
   const isGrid = REG[reg];
   $("#reserveBtn").style.display = isGrid ? "" : "none";
-  $("#addSpecBtn").style.display = isGrid ? "" : "none";
+  if (isGrid) $("#reserveBtn").innerHTML = `<span class="plus">+</span> ${REG[reg].addLabel || "Reserve next number"}`;
+  $("#addSpecBtn").style.display = (isGrid && !REG[reg].noSpecific) ? "" : "none";
   $("#nameSel").parentElement.style.display = isGrid ? "" : "none";
   $("#search").style.display = isGrid ? "" : "none";
   $("#usage").style.display = isGrid ? "" : "none";
@@ -397,7 +433,7 @@ $("#search").addEventListener("input", e => { SEARCH = e.target.value.toLowerCas
 async function loadReg(){
   if (CUR==="incoming") await loadOutgoingNos();
   if (CUR==="outgoing") await loadIncomingNos();
-  const { data, error } = await sb.from(CUR).select("*").eq("fy", FY).order("seq");
+  const { data, error } = await sb.from(CUR).select("*").eq("fy", regFy(CUR)).order("seq");
   if (error) return toast(error.message, true);
   ROWS = data; renderGrid(); updateUsage();
 }
@@ -416,8 +452,13 @@ function updateUsage(){
   const cap = Number(SETTINGS[REG[CUR].cap] || 0);
   const used = ROWS.filter(r => r.status!=="Cancelled").length;
   const el = $("#usage");
-  el.textContent = `${used} / ${cap} numbers used`;
-  el.className = "usage" + ((cap && used >= cap-25) ? " warn" : "");
+  if (cap){
+    el.textContent = `${used} / ${cap} numbers used`;
+    el.className = "usage" + (used >= cap-25 ? " warn" : "");
+  } else {
+    el.textContent = `${used} ${CUR==="inventory" ? "items" : "rows"}`;
+    el.className = "usage";
+  }
 }
 
 function renderGrid(){
@@ -518,12 +559,12 @@ $("#reserveBtn").addEventListener("click", async () => {
   const name = $("#nameSel").value || null;
   $("#reserveBtn").disabled = true;
   const { data, error } = await sb.rpc("reserve_number",
-    {p_register: CUR, p_fy: FY, p_name: name});
+    {p_register: CUR, p_fy: regFy(CUR), p_name: name});
   $("#reserveBtn").disabled = false;
   if (error) return toast(error.message, true);
   const seq = data[0].seq;
   await loadReg();
-  toast("Reserved number " + pad(seq));
+  toast((CUR==="inventory" ? "Added item " : "Reserved number ") + pad(seq));
   // scroll to & focus the new row's first editable cell
   const tr = $("#view").querySelector(`tr[data-id="${data[0].id}"]`);
   if (tr){ tr.scrollIntoView({block:"center"}); const f=tr.querySelector("select,input,textarea"); if(f) f.focus(); }
@@ -538,7 +579,7 @@ $("#addSpecBtn").addEventListener("click", async () => {
   const name = $("#nameSel").value || null;
   $("#addSpecBtn").disabled = true;
   const { data, error } = await sb.rpc("add_number",
-    {p_register: CUR, p_fy: FY, p_seq: n, p_name: name});
+    {p_register: CUR, p_fy: regFy(CUR), p_seq: n, p_name: name});
   $("#addSpecBtn").disabled = false;
   if (error){
     if (/exists/i.test(error.message)) return toast("Number " + pad(n) + " is already in the register", true);
@@ -554,8 +595,8 @@ $("#addSpecBtn").addEventListener("click", async () => {
 async function renderSummary(){
   $("#view").innerHTML = `<div class="empty">Loading…</div>`;
   const all = {};
-  for (const t of ["outgoing","incoming","challan","work_orders"]){
-    const { data } = await sb.from(t).select("status").eq("fy", FY);
+  for (const t of ["outgoing","incoming","challan","work_orders","tenders","inventory"]){
+    const { data } = await sb.from(t).select("status").eq("fy", regFy(t));
     all[t] = data || [];
   }
   const count = (arr,s)=>arr.filter(r=>r.status===s).length;
@@ -563,7 +604,7 @@ async function renderSummary(){
     rows.map(([l,v,bad])=>`<div class="row ${bad?'bad':''}"><span>${l}</span><b>${v}</b></div>`).join("")
   }</div>`;
 
-  const o=all.outgoing, i=all.incoming, c=all.challan, w=all.work_orders;
+  const o=all.outgoing, i=all.incoming, c=all.challan, w=all.work_orders, t=all.tenders, inv=all.inventory;
   $("#view").innerHTML = `<div class="cards">
     ${card("Outgoing letters", [
       ["Issued", count(o,"Issued")],
@@ -589,6 +630,18 @@ async function renderSummary(){
       ["Reserved (not yet issued)", count(w,"Reserved"), count(w,"Reserved")>0],
       ["Cancelled", count(w,"Cancelled")],
     ])}
+    ${card("Tenders", [
+      ["Floated", count(t,"Floated")],
+      ["Awarded", count(t,"Awarded")],
+      ["Reserved (not yet floated)", count(t,"Reserved"), count(t,"Reserved")>0],
+      ["Cancelled", count(t,"Cancelled")],
+    ])}
+    ${card("Inventory (all years)", [
+      ["Available", count(inv,"Available")],
+      ["Low", count(inv,"Low"), count(inv,"Low")>0],
+      ["Out of stock", count(inv,"Out"), count(inv,"Out")>0],
+      ["Total items", inv.length],
+    ])}
   </div>`;
 }
 
@@ -604,7 +657,8 @@ function renderLists(){
     ${grp("Team names (Prepared by / Received by)","team")}
     ${grp("Addressees (To / From / Delivered to)","addressee")}
     ${grp("Contract numbers","contract")}
-    ${grp("Vendors (Work Orders)","vendor")}
+    ${grp("Vendors (Work Orders / Tenders)","vendor")}
+    ${grp("Item types (Inventory)","item_type")}
     <div class="box"><h3>Settings</h3>
       <label>Register keeper (name)</label>
       <input class="set" id="setKeeper" value="${esc(SETTINGS.register_keeper||"")}">
