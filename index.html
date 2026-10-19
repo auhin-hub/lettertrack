@@ -156,6 +156,9 @@
   <div id="toolbar">
     <button class="reserve" id="reserveBtn"><span class="plus">+</span> Reserve next number</button>
     <button class="addspec" id="addSpecBtn">Enter a specific number…</button>
+    <label class="usage" id="tenderTypeWrap" style="display:none">Tender type:
+      <select class="nameSel" id="tenderType"></select>
+    </label>
     <label class="usage">Your name:
       <select class="nameSel" id="nameSel"></select>
     </label>
@@ -272,7 +275,8 @@ const REG = {
   tenders: {
     label:"Tenders", cap:"cap_tenders",
     cols:[
-      {k:"_no",   t:"Tender No.", ro:r=>"TBL/D/Tender/"+pad(r.seq)},
+      {k:"_no",   t:"Tender No.", ro:r=>`TBL.DS.${r.type_code||"00"}.${pad(r.seq)}.${fyYY(r.fy)}`},
+      {k:"_type", t:"Type", ro:r=> (TENDER_TYPES.find(x=>x.code===r.type_code)||{}).label || "" },
       {k:"status",t:"Status", type:"status", opts:["Reserved","Floated","Awarded","Cancelled"], statusCell:true},
       {k:"date",  t:"Floated Date", type:"date", flag:true},
       {k:"contract_no",t:"Contract No.", type:"list", list:"contract"},
@@ -302,6 +306,16 @@ const REG = {
 };
 // inventory is one running list, not split by fiscal year
 function regFy(reg){ return (REG[reg] && REG[reg].global) ? "ALL" : FY; }
+
+// Tender types (code -> label). The code is the 2-digit block in the number.
+const TENDER_TYPES = [
+  {code:"01", label:"Tools & Accessories"},
+  {code:"02", label:"Publications"},
+  {code:"03", label:"Military Attachments"},
+  {code:"04", label:"Miscellaneous"},
+];
+// last two digits of a fiscal-year label, e.g. "FY 2026-27" -> "26"
+function fyYY(fy){ const m = String(fy||"").match(/\d{4}/); return m ? m[0].slice(2) : ""; }
 
 /* ============================ STATE ================================ */
 let LISTS = {team:[], addressee:[], contract:[], vendor:[]};
@@ -365,6 +379,7 @@ async function start(session){
   await loadLists();
   await loadSettings();
   buildNameSel();
+  $("#tenderType").innerHTML = TENDER_TYPES.map(t=>`<option value="${t.code}">${t.code} — ${esc(t.label)}</option>`).join("");
   await buildFySel();
   subscribeRealtime();
   selectReg(CUR);
@@ -417,6 +432,7 @@ function selectReg(reg){
   $("#reserveBtn").style.display = isGrid ? "" : "none";
   if (isGrid) $("#reserveBtn").innerHTML = `<span class="plus">+</span> ${REG[reg].addLabel || "Reserve next number"}`;
   $("#addSpecBtn").style.display = (isGrid && !REG[reg].noSpecific) ? "" : "none";
+  $("#tenderTypeWrap").style.display = (reg==="tenders") ? "" : "none";
   $("#nameSel").parentElement.style.display = isGrid ? "" : "none";
   $("#search").style.display = isGrid ? "" : "none";
   $("#usage").style.display = isGrid ? "" : "none";
@@ -433,7 +449,9 @@ $("#search").addEventListener("input", e => { SEARCH = e.target.value.toLowerCas
 async function loadReg(){
   if (CUR==="incoming") await loadOutgoingNos();
   if (CUR==="outgoing") await loadIncomingNos();
-  const { data, error } = await sb.from(CUR).select("*").eq("fy", regFy(CUR)).order("seq");
+  let q = sb.from(CUR).select("*").eq("fy", regFy(CUR));
+  q = (CUR==="tenders") ? q.order("type_code").order("seq") : q.order("seq");
+  const { data, error } = await q;
   if (error) return toast(error.message, true);
   ROWS = data; renderGrid(); updateUsage();
 }
@@ -558,13 +576,19 @@ async function saveCell(id, k, value){
 $("#reserveBtn").addEventListener("click", async () => {
   const name = $("#nameSel").value || null;
   $("#reserveBtn").disabled = true;
-  const { data, error } = await sb.rpc("reserve_number",
-    {p_register: CUR, p_fy: regFy(CUR), p_name: name});
+  let data, error;
+  if (CUR==="tenders"){
+    const type = $("#tenderType").value;
+    ({ data, error } = await sb.rpc("reserve_tender", {p_fy: regFy(CUR), p_type: type, p_name: name}));
+  } else {
+    ({ data, error } = await sb.rpc("reserve_number", {p_register: CUR, p_fy: regFy(CUR), p_name: name}));
+  }
   $("#reserveBtn").disabled = false;
   if (error) return toast(error.message, true);
   const seq = data[0].seq;
   await loadReg();
-  toast((CUR==="inventory" ? "Added item " : "Reserved number ") + pad(seq));
+  if (CUR==="tenders") toast(`Reserved TBL.DS.${$("#tenderType").value}.${pad(seq)}.${fyYY(FY)}`);
+  else toast((CUR==="inventory" ? "Added item " : "Reserved number ") + pad(seq));
   // scroll to & focus the new row's first editable cell
   const tr = $("#view").querySelector(`tr[data-id="${data[0].id}"]`);
   if (tr){ tr.scrollIntoView({block:"center"}); const f=tr.querySelector("select,input,textarea"); if(f) f.focus(); }
@@ -572,21 +596,27 @@ $("#reserveBtn").addEventListener("click", async () => {
 
 /* ---- Enter a specific number (skip ahead, e.g. jump to 128) ---- */
 $("#addSpecBtn").addEventListener("click", async () => {
-  const raw = prompt("Enter the number to add (just the digits, e.g. 128):");
+  const label = (CUR==="tenders") ? "serial for this type (e.g. 5)" : "number to add (just the digits, e.g. 128)";
+  const raw = prompt("Enter the " + label + ":");
   if (raw===null) return;
   const n = parseInt(String(raw).trim(), 10);
-  if (!Number.isInteger(n) || n < 1) return toast("Please enter a whole number like 128", true);
+  if (!Number.isInteger(n) || n < 1) return toast("Please enter a whole number", true);
   const name = $("#nameSel").value || null;
   $("#addSpecBtn").disabled = true;
-  const { data, error } = await sb.rpc("add_number",
-    {p_register: CUR, p_fy: regFy(CUR), p_seq: n, p_name: name});
+  let data, error;
+  if (CUR==="tenders"){
+    const type = $("#tenderType").value;
+    ({ data, error } = await sb.rpc("add_tender", {p_fy: regFy(CUR), p_type: type, p_seq: n, p_name: name}));
+  } else {
+    ({ data, error } = await sb.rpc("add_number", {p_register: CUR, p_fy: regFy(CUR), p_seq: n, p_name: name}));
+  }
   $("#addSpecBtn").disabled = false;
   if (error){
-    if (/exists/i.test(error.message)) return toast("Number " + pad(n) + " is already in the register", true);
+    if (/exists/i.test(error.message)) return toast("That number already exists", true);
     return toast(error.message, true);
   }
   await loadReg();
-  toast("Added number " + pad(n));
+  toast("Added " + pad(n));
   const tr = $("#view").querySelector(`tr[data-id="${data[0].id}"]`);
   if (tr){ tr.scrollIntoView({block:"center"}); const f=tr.querySelector("select,input,textarea"); if(f) f.focus(); }
 });
